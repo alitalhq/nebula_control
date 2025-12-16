@@ -15,8 +15,8 @@ setup(
     zip_safe=True,
     maintainer='alitalha',
     maintainer_email='alitqlhq@gmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='ROS 2 package for managing Nebula operations and modes',
+    license='MIT',
     extras_require={
         'test': [
             'pytest',
@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'operation_manager_node = nebula_control.operation_manager_node:main'
         ],
     },
 )
