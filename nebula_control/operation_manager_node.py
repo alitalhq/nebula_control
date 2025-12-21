@@ -3,7 +3,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy, QoSReliabilityPolicy
 
 from nebula_interfaces.msg import BalloonArray, RectangleArray, GimbalFeedback, GimbalCommand, GimbalMode
-from nebula_interfaces.srv import FireCommand, SetMode
+from nebula_interfaces.srv import SetMode
 
 class OperationManagerNode(Node):
 
@@ -19,9 +19,8 @@ class OperationManagerNode(Node):
         cmd_qos.reliability=ReliabilityPolicy.RELIABLE
         cmd_qos.history=HistoryPolicy.KEEP_LAST
     
-        gimbal_feedback_qos = QoSProfile(depth=1)
-        gimbal_feedback_qos.reliability = ReliabilityPolicy.BEST_EFFORT
-        gimbal_feedback_qos.history = HistoryPolicy.KEEP_LAST
+        feedback_qos = QoSProfile(depth=1)
+        feedback_qos.reliability = ReliabilityPolicy.BEST_EFFORT
 
         target_qos = QoSProfile(depth=1)
         target_qos.reliability = QoSReliabilityPolicy.BEST_EFFORT
@@ -33,7 +32,7 @@ class OperationManagerNode(Node):
         # Subscriptions
         self.balloons_sub = self.create_subscription(BalloonArray, '/vision/balloons', self.balloons_callback, target_qos)
         self.balloons_sub = self.create_subscription(RectangleArray, '/vision/rectangles', self.rectangles_callback, target_qos)
-        self.gimbal_feedback_sub = self.create_subscription(GimbalFeedback, '/gimbal/feedback', self.gimbal_feedback_callback, gimbal_feedback_qos)
+        self.gimbal_feedback_sub = self.create_subscription(GimbalFeedback, '/gimbal/feedback', self.gimbal_feedback_callback, feedback_qos)
         
         # Publishers
         self.gimbal_command_pub = self.create_publisher(GimbalCommand, '/gimbal/command', cmd_qos)
@@ -68,7 +67,7 @@ class OperationManagerNode(Node):
 
     def gimbal_feedback_callback(self, msg):
         self.last_gimbal_feedback = msg
-        self.get_logger().info(f'Received gimbal feedback: Pan={msg.current_pan_angle:.2f}, Tilt={msg.current_tilt_angle:.2f}')
+        #self.get_logger().info(f'Received gimbal feedback: Pan={msg.current_pan_angle:.2f}, Tilt={msg.current_tilt_angle:.2f}')
 
     def set_mode_callback(self, request, response):
         if request.mode in [self.MODE_SAFE, self.MODE_SEARCH, self.MODE_LASER]:
@@ -85,11 +84,22 @@ class OperationManagerNode(Node):
     
     def send_gimbal_command(self, u_norm, v_norm):
         cmd = GimbalCommand()
+
+        cmd.mode = GimbalCommand.MODE_POS
+        cmd.ref_frame = GimbalCommand.REF_BODY
+
+        cmd.target_u_norm = float(u_norm)
+        cmd.target_v_norm = float(v_norm)
+
         cmd.pan_deg = 0.0   # gimbal node will convert u_norm -> pan
         cmd.tilt_deg = 0.0  # gimbal node will convert v_norm -> tilt
-        # Store normalized target for gimbal node
-        cmd.target_u_norm = u_norm
-        cmd.target_v_norm = v_norm
+
+        cmd.laser_enable = True
+        cmd.laser_fire_request = True
+
+        cmd.priority = 1
+        cmd.requester = "operation_manager"
+        
         self.gimbal_command_pub.publish(cmd)
 
     """

@@ -5,7 +5,7 @@ package_name = 'nebula_control'
 setup(
     name=package_name,
     version='0.0.0',
-    packages=find_packages(exclude=['test']),
+    packages=[package_name],
     data_files=[
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='alitalha',
     maintainer_email='alitqlhq@gmail.com',
-    description='ROS 2 package for managing Nebula operations and modes',
+    description='ROS2 package for Nebula control nodes',
     license='MIT',
     extras_require={
         'test': [
@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'operation_manager_node = nebula_control.operation_manager_node:main'
+            'operation_manager_node = nebula_control.operation_manager_node:main',
+            'gimbal_control_node = hss_gimbal_control.gimbal_control_node:main'
         ],
     },
 )
