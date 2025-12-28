@@ -38,7 +38,7 @@ class GimbalControllerNode(Node):
 
         self.cam_info_sub = self.create_subscription(
             CameraInfo,
-            '/camera/info',
+            '/camera/camera_info',
             self.camera_info_callback,
             cam_qos
         )
@@ -56,11 +56,12 @@ class GimbalControllerNode(Node):
         self.cy = None
         self.img_w = None
         self.img_h = None
+        
 
         # -------------- Serial ---------------
         try:
             self.serial_port = serial.Serial(
-                port='/dev/ttyUSB0',
+                port='/dev/ttyACM0',
                 baudrate=115200,
                 timeout=0.01
             )
@@ -68,6 +69,8 @@ class GimbalControllerNode(Node):
         except Exception as e:
             self.serial_port = None
             self.get_logger().error(f'Serial error: {e}')
+            
+        self.get_logger().info(f'Gimbal Control Node has been started')
 
     # =========================================================
 
@@ -88,7 +91,7 @@ class GimbalControllerNode(Node):
 
         # ---------- MODE_POS ----------
         if msg.mode == GimbalCommand.MODE_POS:
-            pan_deg, tilt_deg = self.norm_to_angle(
+            pan_delta, tilt_delta = self.norm_to_angle(
                 msg.target_u_norm,
                 msg.target_v_norm
             )
@@ -98,16 +101,16 @@ class GimbalControllerNode(Node):
 
         # ---------- SERIAL PACKET ----------
         self.send_to_mcu(
-            pan_deg=pan_deg,
-            tilt_deg=tilt_deg,
+            pan_delta=pan_delta,
+            tilt_delta=tilt_delta,
             laser_enable=msg.laser_enable,
             laser_fire=msg.laser_fire_request
         )
 
         # ---------- Feedback (placeholder) ----------
         fb = GimbalFeedback()
-        fb.current_pan_angle = pan_deg
-        fb.current_tilt_angle = tilt_deg
+        fb.pan_deg = pan_delta
+        fb.tilt_deg = tilt_delta
         self.feedback_pub.publish(fb)
 
     # =========================================================
@@ -129,24 +132,29 @@ class GimbalControllerNode(Node):
 
     # =========================================================
 
-    def send_to_mcu(self, pan_deg, tilt_deg, laser_enable, laser_fire):
+    def send_to_mcu(self, pan_delta, tilt_delta, laser_enable, laser_fire):
         """
-        Binary packet:
-        float pan
-        float tilt
-        uint8 laser_enable
-        uint8 laser_fire
+        Binary packet structure (Total 12 bytes):
+        - Header 1: 0xAA (uint8)
+        - Header 2: 0xFF (uint8)
+        - Pan Delta: float32 (4 bytes)
+        - Tilt Delta: float32 (4 bytes)
+        - Laser Enable: uint8 (1 byte)
+        - Laser Fire: uint8 (1 byte)
+        Format string: '<BBffBB'
         """
-        if not self.serial_port:
+        if not self.serial_port or not self.serial_port.is_open:
             return
 
         try:
             packet = struct.pack(
-                '<ffBB',
-                float(pan_deg),
-                float(tilt_deg),
-                int(laser_enable),
-                int(laser_fire)
+                '<BBffBB',
+                0xAA,               # Header 1
+                0xFF,               # Header 2
+                float(pan_delta),    # 4 byte float
+                float(tilt_delta),   # 4 byte float
+                int(laser_enable),   # 1 byte
+                int(laser_fire)      # 1 byte
             )
             self.serial_port.write(packet)
         except Exception as e:

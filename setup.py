@@ -25,7 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'operation_manager_node = nebula_control.operation_manager_node:main',
-            'gimbal_control_node = hss_gimbal_control.gimbal_control_node:main'
+            'gimbal_control_node = nebula_control.gimbal_control_node:main'
         ],
     },
 )
