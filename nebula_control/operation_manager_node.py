@@ -86,8 +86,6 @@ class OperationManagerNode(Node):
         self.lock_until = 0
         self.is_waiting = False
 
-        self.timer = self.create_timer(0.1, self.periodic_task)
-
     def camera_info_callback(self, msg):
         self.fx = msg.k[0]
         self.fy = msg.k[4]
@@ -124,7 +122,7 @@ class OperationManagerNode(Node):
         
         target = min(msg.balloons, key=lambda b: ((b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2))
 
-        pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target,v.norm)
+        pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target,v_norm)
         
         is_centered = abs(target.u_norm - 0.5) < 0.01 and abs(target.v_norm - 0.5) < 0.01
 
