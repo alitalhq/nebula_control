@@ -2,8 +2,14 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy, QoSReliabilityPolicy
 
-from nebula_interfaces.msg import BalloonArray, RectangleArray, GimbalFeedback, GimbalCommand, GimbalMode
+from sensor_msgs.msg import CameraInfo
+from nebula_interfaces.msg import BalloonArray, RectangleArray, GimbalFeedback, GimbalMode
 from nebula_interfaces.srv import SetMode
+
+import serial
+import struct
+import math
+import time
 
 class OperationManagerNode(Node):
 
@@ -14,13 +20,14 @@ class OperationManagerNode(Node):
 
     def __init__(self):
         super().__init__('operation_manager_node')
-
-        cmd_qos = QoSProfile(depth=10)
-        cmd_qos.reliability=ReliabilityPolicy.RELIABLE
-        cmd_qos.history=HistoryPolicy.KEEP_LAST
     
         feedback_qos = QoSProfile(depth=1)
         feedback_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        feedback_qos.history = HistoryPolicy.KEEP_LAST
+
+        cam_qos = QoSProfile(depth=1)
+        cam_qos.reliability = ReliabilityPolicy.BEST_EFFORT
+        cam_qos.history = HistoryPolicy.KEEP_LAST
 
         target_qos = QoSProfile(depth=1)
         target_qos.reliability = QoSReliabilityPolicy.BEST_EFFORT
@@ -29,14 +36,26 @@ class OperationManagerNode(Node):
         mode_qos.reliability = QoSReliabilityPolicy.RELIABLE
         mode_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
 
+        # -------------- Serial ---------------
+        try:
+            self.serial_port = serial.Serial(
+                port='/dev/ttyACM0',
+                baudrate=115200,
+                timeout=0.01
+            )
+            self.get_logger().info('Serial connected')
+        except Exception as e:
+            self.serial_port = None
+            self.get_logger().error(f'Serial error: {e}')
+        
         # Subscriptions
         self.balloons_sub = self.create_subscription(BalloonArray, '/vision/balloons', self.balloons_callback, target_qos)
-        self.balloons_sub = self.create_subscription(RectangleArray, '/vision/rectangles', self.rectangles_callback, target_qos)
-        self.gimbal_feedback_sub = self.create_subscription(GimbalFeedback, '/gimbal/feedback', self.gimbal_feedback_callback, feedback_qos)
-        
+        self.rectangles_sub = self.create_subscription(RectangleArray, '/vision/rectangles', self.rectangles_callback, target_qos)
+        self.cam_info_sub = self.create_subscription(CameraInfo, '/camera/camera_info', self.camera_info_callback, cam_qos)
+
         # Publishers
-        self.gimbal_command_pub = self.create_publisher(GimbalCommand, '/gimbal/command', cmd_qos)
         self.gimbal_mode_pub = self.create_publisher(GimbalMode, '/gimbal/mode', mode_qos)
+        self.feedback_pub = self.create_publisher(GimbalFeedback, '/gimbal/feedback', feedback_qos)
 
         """
         # Clients
@@ -48,6 +67,13 @@ class OperationManagerNode(Node):
         # Services
         self.set_mode_service = self.create_service(SetMode, '/gimbal/set_mode', self.set_mode_callback)
 
+        self.fx = None
+        self.fy = None
+        self.cx = None
+        self.cy = None
+        self.img_w = None
+        self.img_h = None
+
         self.current_mode = self.MODE_LASER #TESTLERDEN SONRA MODE_SAFE YAPMAYI UNUTMA
         self.gimbal_mode_pub.publish(GimbalMode(mode=self.current_mode))
         self.get_logger().info(f'Operation Manager Node has been started in {self.current_mode} mode.')
@@ -57,17 +83,18 @@ class OperationManagerNode(Node):
         self.last_balloons = None
         self.last_rectangles = None
 
+        self.lock_until = 0
+        self.is_waiting = False
+
         self.timer = self.create_timer(0.1, self.periodic_task)
 
-    def balloons_callback(self, msg):
-        self.last_balloons = msg
-
-    def rectangles_callback(self, msg):
-        self.last_rectangles = msg
-
-    def gimbal_feedback_callback(self, msg):
-        self.last_gimbal_feedback = msg
-        #self.get_logger().info(f'Received gimbal feedback: Pan={msg.current_pan_angle:.2f}, Tilt={msg.current_tilt_angle:.2f}')
+    def camera_info_callback(self, msg):
+        self.fx = msg.k[0]
+        self.fy = msg.k[4]
+        self.cx = msg.k[2]
+        self.cy = msg.k[5]
+        self.img_w = msg.width
+        self.img_h = msg.height
 
     def set_mode_callback(self, request, response):
         if request.mode in [self.MODE_SAFE, self.MODE_SEARCH, self.MODE_LASER]:
@@ -81,26 +108,84 @@ class OperationManagerNode(Node):
             response.message = f"Invalid mode: {request.mode}"
             self.get_logger().warn(f'Invalid mode requested: {request.mode}')
         return response
-    
-    def send_gimbal_command(self, u_norm, v_norm):
-        cmd = GimbalCommand()
 
-        cmd.mode = GimbalCommand.MODE_POS
-        cmd.ref_frame = GimbalCommand.REF_BODY
+    def balloons_callback(self, msg):
+        current_time = time.time()
 
-        cmd.target_u_norm = float(u_norm)
-        cmd.target_v_norm = float(v_norm)
+        if current_time < self.lock_until:
+            if not self.is_waiting:
+                self.get_logger().info("System locked for 3 seconds, waiting...")
+                self.is_waiting = True
+            #return   #testlerden sonra return aktif edilmeli
+        self.is_waiting = False
 
-        cmd.pan_deg = 0.0   # gimbal node will convert u_norm -> pan
-        cmd.tilt_deg = 0.0  # gimbal node will convert v_norm -> tilt
-
-        cmd.laser_enable = True
-        cmd.laser_fire_request = True
-
-        cmd.priority = 1
-        cmd.requester = "operation_manager"
+        if self.current_mode != self.MODE_LASER or not msg.balloons or self.fx is None:
+            return
         
-        self.gimbal_command_pub.publish(cmd)
+        target = min(msg.balloons, key=lambda b: ((b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2))
+
+        pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target,v.norm)
+        
+        is_centered = abs(target.u_norm - 0.5) < 0.01 and abs(target.v_norm - 0.5) < 0.01
+
+        fire_signal = False
+        if is_centered:
+            fire_signal = True
+            self.lock_until = current_time + 3.0
+            self.get_logger().info("Laser Armed! Waiting for 3 seconds...")
+
+        self.send_to_mcu(pan_delta, tilt_delta, True, is_centered)
+
+
+        fb = GimbalFeedback
+        fb.pan_deg, fb.tilt_deg = pan_delta, tilt_delta
+        self.feedback_pub.publish(fb)
+
+    def rectangles_callback(self, msg):
+        self.last_rectangles = msg
+
+
+    def norm_to_angle(self, u_norm, v_norm):
+
+        u = u_norm * self.img_w
+        v = v_norm * self.img_h
+
+        x = (u - self.cx) / self.fx
+        y = (v - self.cy) / self.fy
+
+        pan = math.degrees(math.atan(x))
+        tilt = -math.degrees(math.atan(y))
+
+        return pan, tilt
+    
+    def send_to_mcu(self, pan_delta, tilt_delta, laser_enable, laser_fire):
+        """
+        Binary packet structure (Total 12 bytes):
+        - Header 1: 0xAA (uint8)
+        - Header 2: 0xFF (uint8)
+        - Pan Delta: float32 (4 bytes)
+        - Tilt Delta: float32 (4 bytes)
+        - Laser Enable: uint8 (1 byte)
+        - Laser Fire: uint8 (1 byte)
+        Format string: '<BBffBB'
+        """
+        if not self.serial_port or not self.serial_port.is_open:
+            return
+
+        try:
+            packet = struct.pack(
+                '<BBffBB',
+                0xAA,               # Header 1
+                0xFF,               # Header 2
+                float(pan_delta),    # 4 byte float
+                float(tilt_delta),   # 4 byte float
+                int(laser_enable),   # 1 byte
+                int(laser_fire)      # 1 byte
+            )
+            self.serial_port.write(packet)
+        except Exception as e:
+            self.get_logger().error(f'Serial write failed: {e}')
+
 
     """
     def send_laser_fire_command(self):
@@ -114,35 +199,6 @@ class OperationManagerNode(Node):
         else:
             self.get_logger().warn('Laser fire service not available')
     """
-
-
-    # ------------------ Main periodic task ------------------
-    def periodic_task(self):
-        if self.current_mode == self.MODE_SAFE:
-            # TODO: park gimbal, laser off
-            pass
-
-        elif self.current_mode == self.MODE_SEARCH:
-            # TODO: search mode logic
-            pass
-
-        elif self.current_mode == self.MODE_LASER:
-            # Select closest balloon
-            target = None
-            if self.last_balloons and len(self.last_balloons.balloons) > 0:
-                # choose balloon with max confidence or closest to center
-                target = min(
-                    self.last_balloons.balloons,
-                    key=lambda b: ((b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2)
-                )
-
-            if target:
-                # Send gimbal command
-                self.send_gimbal_command(target.u_norm, target.v_norm)
-                # Fire laser if roughly centered
-                if abs(target.u_norm - 0.5) < 0.005 and abs(target.v_norm - 0.5) < 0.005:
-                    #self.send_laser_fire_command()
-                    self.get_logger().info("ATEŞ!")
 
 def main(args=None):
     rclpy.init(args=args)
