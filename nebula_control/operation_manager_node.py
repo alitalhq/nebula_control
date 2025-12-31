@@ -212,37 +212,37 @@ class OperationManagerNode(Node):
             self.get_logger().warn('Laser fire service not available')
     """
 
-def parameter_callback(self, params):    
-    for param in params:
-        if param.name == 'centering_threshold':
-            self.threshold = param.value
-            self.get_logger().info(f'Parameter updated: centering_threshold = {self.threshold}')
-        elif param.name == 'lock_duration':
-            self.lock_duration = param.value
-            self.get_logger().info(f'Parameter updated: lock_duration = {self.lock_duration}')
-            
-        elif param.name in ['serial_port', 'baudrate']:
-            self.get_logger().info(f'Hardware setting changed: {param.name}. Resetting serial connection...')
-            
-            if param.name == 'serial_port':
-                self.serial_port_name = param.value
-            if param.name == 'baudrate':
-                self.baud_rate_val = param.value
-
-            try:
-                if self.serial_port and self.serial_port.is_open:
-                    self.serial_port.close()
+    def parameter_callback(self, params):    
+        for param in params:
+            if param.name == 'centering_threshold':
+                self.threshold = param.value
+                self.get_logger().info(f'Parameter updated: centering_threshold = {self.threshold}')
+            elif param.name == 'lock_duration':
+                self.lock_duration = param.value
+                self.get_logger().info(f'Parameter updated: lock_duration = {self.lock_duration}')
                 
-                self.serial_port = serial.Serial(
-                    port=self.serial_port_name,
-                    baudrate=self.baud_rate_val,
-                    timeout=0.01
-                )
-                self.get_logger().info(f'Serial connection re-established successfully on: {self.serial_port_name}')
-            except Exception as e:
-                self.get_logger().error(f'Failed to re-establish serial connection: {e}')
-
-    return SetParametersResult(successful=True)
+            elif param.name in ['serial_port', 'baudrate']:
+                self.get_logger().info(f'Hardware setting changed: {param.name}. Resetting serial connection...')
+                
+                if param.name == 'serial_port':
+                    self.serial_port_name = param.value
+                if param.name == 'baudrate':
+                    self.baud_rate_val = param.value
+    
+                try:
+                    if self.serial_port and self.serial_port.is_open:
+                        self.serial_port.close()
+                    
+                    self.serial_port = serial.Serial(
+                        port=self.serial_port_name,
+                        baudrate=self.baud_rate_val,
+                        timeout=0.01
+                    )
+                    self.get_logger().info(f'Serial connection re-established successfully on: {self.serial_port_name}')
+                except Exception as e:
+                    self.get_logger().error(f'Failed to re-establish serial connection: {e}')
+    
+        return SetParametersResult(successful=True)
     
 def main(args=None):
     rclpy.init(args=args)
