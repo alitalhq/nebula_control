@@ -1,6 +1,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy, QoSReliabilityPolicy
+from rcl_interfaces.msg import SetParametersResult
 
 from sensor_msgs.msg import CameraInfo
 from nebula_interfaces.msg import BalloonArray, RectangleArray, GimbalFeedback, GimbalMode
@@ -20,6 +21,19 @@ class OperationManagerNode(Node):
 
     def __init__(self):
         super().__init__('operation_manager_node')
+
+        self.declare_parameter('serial_port', '/dev/ttyACM0')
+        self.declare_parameter('baudrate', 921600)
+        self.declare_parameter('centering_threshold', 0.01)
+        self.declare_parameter('lock_duration', 3.0)
+
+        # Parametre değerlerini oku
+        self.serial_port_name = self.get_parameter('serial_port').value
+        self.baud_rate_val = self.get_parameter('baudrate').value
+        self.threshold = self.get_parameter('centering_threshold').value
+        self.lock_duration = self.get_parameter('lock_duration').value
+
+        self.add_on_set_parameters_callback(self.parameter_callback)
     
         feedback_qos = QoSProfile(depth=1)
         feedback_qos.reliability = ReliabilityPolicy.BEST_EFFORT
@@ -39,8 +53,8 @@ class OperationManagerNode(Node):
         # -------------- Serial ---------------
         try:
             self.serial_port = serial.Serial(
-                port='/dev/ttyACM0',
-                baudrate=115200,
+                port=self.serial_port_name,
+                baudrate=self.baud_rate_val,
                 timeout=0.01
             )
             self.get_logger().info('Serial connected')
@@ -124,15 +138,15 @@ class OperationManagerNode(Node):
 
         pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target.v_norm)
         
-        is_centered = abs(target.u_norm - 0.5) < 0.01 and abs(target.v_norm - 0.5) < 0.01
+        is_centered = abs(target.u_norm - 0.5) < self.threshold and abs(target.v_norm - 0.5) < self.threshold
 
         fire_signal = False
         if is_centered:
             fire_signal = True
-            self.lock_until = current_time + 3.0
-            self.get_logger().info("Laser Armed! Waiting for 3 seconds...")
+            self.lock_until = current_time + self.lock_duration
+            self.get_logger().info(f"Laser Armed! Target Centered. Locking for {self.lock_duration}s...")
 
-        self.send_to_mcu(pan_delta, tilt_delta, True, is_centered)
+        self.send_to_mcu(pan_delta, tilt_delta, True, fire_signal)
 
 
         fb = GimbalFeedback()
@@ -198,6 +212,38 @@ class OperationManagerNode(Node):
             self.get_logger().warn('Laser fire service not available')
     """
 
+def parameter_callback(self, params):    
+    for param in params:
+        if param.name == 'centering_threshold':
+            self.threshold = param.value
+            self.get_logger().info(f'Parameter updated: centering_threshold = {self.threshold}')
+        elif param.name == 'lock_duration':
+            self.lock_duration = param.value
+            self.get_logger().info(f'Parameter updated: lock_duration = {self.lock_duration}')
+            
+        elif param.name in ['serial_port', 'baudrate']:
+            self.get_logger().info(f'Hardware setting changed: {param.name}. Resetting serial connection...')
+            
+            if param.name == 'serial_port':
+                self.serial_port_name = param.value
+            if param.name == 'baudrate':
+                self.baud_rate_val = param.value
+
+            try:
+                if self.serial_port and self.serial_port.is_open:
+                    self.serial_port.close()
+                
+                self.serial_port = serial.Serial(
+                    port=self.serial_port_name,
+                    baudrate=self.baud_rate_val,
+                    timeout=0.01
+                )
+                self.get_logger().info(f'Serial connection re-established successfully on: {self.serial_port_name}')
+            except Exception as e:
+                self.get_logger().error(f'Failed to re-establish serial connection: {e}')
+
+    return SetParametersResult(successful=True)
+    
 def main(args=None):
     rclpy.init(args=args)
     node = OperationManagerNode()
