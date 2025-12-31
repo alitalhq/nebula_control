@@ -1,0 +1,6 @@
+operation_manager:
+  ros__parameters:
+    serial_port: "/dev/ttyACM0"
+    baudrate: 921600
+    centering_threshold: 0.01
+    lock_duration: 3.0
