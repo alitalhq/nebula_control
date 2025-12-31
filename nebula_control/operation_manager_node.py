@@ -122,7 +122,7 @@ class OperationManagerNode(Node):
         
         target = min(msg.balloons, key=lambda b: ((b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2))
 
-        pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target,v_norm)
+        pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target.v_norm)
         
         is_centered = abs(target.u_norm - 0.5) < 0.01 and abs(target.v_norm - 0.5) < 0.01
 
@@ -135,7 +135,7 @@ class OperationManagerNode(Node):
         self.send_to_mcu(pan_delta, tilt_delta, True, is_centered)
 
 
-        fb = GimbalFeedback
+        fb = GimbalFeedback()
         fb.pan_deg, fb.tilt_deg = pan_delta, tilt_delta
         self.feedback_pub.publish(fb)
 
