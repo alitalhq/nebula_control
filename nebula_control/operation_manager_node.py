@@ -70,6 +70,14 @@ class OperationManagerNode(Node):
             )
             self.telemetry_thread.start()
             self.get_logger().info('Telemetry reader thread started')
+
+        self.command_timer = self.create_timer(
+            0.1,  # 10 Hz
+            self.command_timer_callback
+        )
+        
+        self.last_target_time = time.time()
+        self.target_timeout = 0.5  # 0.5 seconds without target → send home command
         
         # Subscriptions
         self.balloons_sub = self.create_subscription(BalloonArray, '/vision/balloons', self.balloons_callback, target_qos)
@@ -142,6 +150,8 @@ class OperationManagerNode(Node):
 
         if self.current_mode != self.MODE_LASER or not msg.balloons or self.fx is None:
             return
+        
+        self.last_target_time = time.time()
         
         target = min(msg.balloons, key=lambda b: ((b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2))
 
@@ -341,6 +351,20 @@ def send_to_mcu(self, pan_delta, tilt_delta, laser_enable, laser_fire):
                     crc <<= 1
                 crc &= 0xFFFF  # Keep 16-bit
         return crc
+    
+    def command_timer_callback(self):
+        """Send periodic commands to MCU"""
+        current_time = time.time()
+        
+        # If no target for timeout period, send home position command
+        if current_time - self.last_target_time > self.target_timeout:
+            # Send home position (0, 0) = parallel to ground
+            self.send_to_mcu(
+                pan_delta=0.0,
+                tilt_delta=0.0,
+                laser_enable=True,
+                laser_fire=False
+            )
 
     def parameter_callback(self, params):    
         for param in params:
