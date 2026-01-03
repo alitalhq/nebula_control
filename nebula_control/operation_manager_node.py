@@ -9,6 +9,7 @@ from nebula_interfaces.srv import SetMode
 
 import serial
 import struct
+import threading
 import math
 import time
 
@@ -61,6 +62,14 @@ class OperationManagerNode(Node):
         except Exception as e:
             self.serial_port = None
             self.get_logger().error(f'Serial error: {e}')
+
+        if self.serial_port:
+            self.telemetry_thread = threading.Thread(
+                target=self.telemetry_reader_loop,
+                daemon=True
+            )
+            self.telemetry_thread.start()
+            self.get_logger().info('Telemetry reader thread started')
         
         # Subscriptions
         self.balloons_sub = self.create_subscription(BalloonArray, '/vision/balloons', self.balloons_callback, target_qos)
@@ -170,34 +179,139 @@ class OperationManagerNode(Node):
 
         return pan, tilt
     
-    def send_to_mcu(self, pan_delta, tilt_delta, laser_enable, laser_fire):
-        """
-        Binary packet structure (Total 12 bytes):
-        - Header 1: 0xAA (uint8)
-        - Header 2: 0xFF (uint8)
-        - Pan Delta: float32 (4 bytes)
-        - Tilt Delta: float32 (4 bytes)
-        - Laser Enable: uint8 (1 byte)
-        - Laser Fire: uint8 (1 byte)
-        Format string: '<BBffBB'
-        """
-        if not self.serial_port or not self.serial_port.is_open:
-            return
+def send_to_mcu(self, pan_delta, tilt_delta, laser_enable, laser_fire):
+    """
+    Binary packet structure (22 bytes total):
+    - [0-1]   Header: 0xAA 0xFF
+    - [2-5]   pan_delta (float32)
+    - [6-9]   tilt_delta (float32)
+    - [10-13] feedforward_vel_pan (float32) - set to 0 for now
+    - [14-17] feedforward_vel_tilt (float32) - set to 0 for now
+    - [18]    laser_enable (uint8)
+    - [19]    laser_fire (uint8)
+    - [20-21] CRC16
+    """
+    if not self.serial_port or not self.serial_port.is_open:
+        self.get_logger().warn('Serial port not open, cannot send command')
+        return
 
+    try:
+        # Build packet (without CRC first)
+        packet_data = struct.pack(
+            '<BBffffBB',
+            0xAA,                    # Header 1
+            0xFF,                    # Header 2
+            float(pan_delta),        # Pan delta (degrees)
+            float(tilt_delta),       # Tilt delta (degrees)
+            0.0,                     # Feedforward vel pan (not used yet)
+            0.0,                     # Feedforward vel tilt (not used yet)
+            int(laser_enable),       # Laser enable flag
+            int(laser_fire)          # Laser fire flag
+        )
+        
+        # Calculate CRC16
+        crc = self.calculate_crc16(packet_data)
+        
+        # Append CRC (little-endian uint16)
+        packet = packet_data + struct.pack('<H', crc)
+        
+        # Send packet
+        self.serial_port.write(packet)
+        
+        # Optional: Log for debugging
+        # self.get_logger().debug(f'Sent: pan={pan_delta:.2f}, tilt={tilt_delta:.2f}, fire={laser_fire}')
+        
+    except Exception as e:
+        self.get_logger().error(f'Serial write failed: {e}')
+
+
+    
+    def telemetry_reader_loop(self):
+        """Background thread to continuously read telemetry from MCU"""
+        buffer = bytearray()
+        TELEMETRY_SIZE = 32  # From SerialProtocol: 32 bytes
+        
+        while rclpy.ok():
+            try:
+                if self.serial_port and self.serial_port.is_open:
+                    # Read available bytes
+                    if self.serial_port.in_waiting > 0:
+                        buffer.extend(self.serial_port.read(self.serial_port.in_waiting))
+                    
+                    # Look for packet (headers 0xAA 0xFF)
+                    while len(buffer) >= TELEMETRY_SIZE:
+                        # Find header
+                        if buffer[0] == 0xAA and buffer[1] == 0xFF:
+                            # Extract packet
+                            packet = buffer[:TELEMETRY_SIZE]
+                            buffer = buffer[TELEMETRY_SIZE:]
+                            
+                            # Parse telemetry
+                            self.parse_telemetry(packet)
+                        else:
+                            # Skip invalid byte
+                            buffer.pop(0)
+                
+                time.sleep(0.01)  # 100 Hz check rate
+                
+            except Exception as e:
+                self.get_logger().error(f'Telemetry read error: {e}')
+                time.sleep(0.1)
+    
+    def parse_telemetry(self, packet):
+        """
+        Parse telemetry packet from MCU
+        Packet structure (32 bytes):
+        - [0-1]   Headers (0xAA 0xFF)
+        - [2-5]   current_world_pan (float32)
+        - [6-9]   current_world_tilt (float32)
+        - [10-13] encoder_pan (float32)
+        - [14-17] encoder_tilt (float32)
+        - [18-21] error_pan (float32)
+        - [22-25] error_tilt (float32)
+        - [26-27] status_flags (uint16)
+        - [28-31] timestamp_ms (uint32)
+        - [30-31] CRC16
+        """
         try:
-            packet = struct.pack(
-                '<BBffBB',
-                0xAA,               # Header 1
-                0xFF,               # Header 2
-                float(pan_delta),    # 4 byte float
-                float(tilt_delta),   # 4 byte float
-                int(laser_enable),   # 1 byte
-                int(laser_fire)      # 1 byte
-            )
-            self.serial_port.write(packet)
+            # Unpack telemetry (little-endian)
+            data = struct.unpack('<BBffffffHIH', packet)
+            
+            header1 = data[0]  # 0xAA
+            header2 = data[1]  # 0xFF
+            current_world_pan = data[2]
+            current_world_tilt = data[3]
+            encoder_pan = data[4]
+            encoder_tilt = data[5]
+            error_pan = data[6]
+            error_tilt = data[7]
+            status_flags = data[8]
+            timestamp_ms = data[9]
+            crc_received = data[10]
+            
+            # TODO: Verify CRC (optional but recommended)
+            
+            # Publish feedback
+            fb = GimbalFeedback()
+            fb.pan_deg = current_world_pan
+            fb.tilt_deg = current_world_tilt
+            fb.error_pan = error_pan
+            fb.error_tilt = error_tilt
+            fb.at_limit = bool(status_flags & 0x0003)  # Pan or tilt at limit
+            fb.safe_mode = bool(status_flags & 0x0010)
+            
+            self.feedback_pub.publish(fb)
+            
+            # Log occasionally for debugging
+            if timestamp_ms % 1000 < 100:  # Every ~1 second
+                self.get_logger().info(
+                    f'Telemetry: World[{current_world_pan:.2f}, {current_world_tilt:.2f}] '
+                    f'Enc[{encoder_pan:.2f}, {encoder_tilt:.2f}] '
+                    f'Err[{error_pan:.3f}, {error_tilt:.3f}]'
+                )
+            
         except Exception as e:
-            self.get_logger().error(f'Serial write failed: {e}')
-
+            self.get_logger().error(f'Telemetry parse error: {e}')
 
     """
     def send_laser_fire_command(self):
@@ -211,6 +325,22 @@ class OperationManagerNode(Node):
         else:
             self.get_logger().warn('Laser fire service not available')
     """
+
+    def calculate_crc16(self, data):
+        """
+        CRC-16-CCITT calculation (matches MCU implementation)
+        Polynomial: 0x1021
+        """
+        crc = 0xFFFF
+        for byte in data:
+            crc ^= (byte << 8)
+            for _ in range(8):
+                if crc & 0x8000:
+                    crc = (crc << 1) ^ 0x1021
+                else:
+                    crc <<= 1
+                crc &= 0xFFFF  # Keep 16-bit
+        return crc
 
     def parameter_callback(self, params):    
         for param in params:
