@@ -78,7 +78,8 @@ class OperationManagerNode(Node):
         
         self.last_target_time = time.time()
         self.target_timeout = 0.5  # 0.5 seconds without target → send home command
-        
+        self.last_commanded_pan = 0.0
+        self.last_commanded_tilt = 0.0
         # Subscriptions
         self.balloons_sub = self.create_subscription(BalloonArray, '/vision/balloons', self.balloons_callback, target_qos)
         self.rectangles_sub = self.create_subscription(RectangleArray, '/vision/rectangles', self.rectangles_callback, target_qos)
@@ -145,7 +146,7 @@ class OperationManagerNode(Node):
             if not self.is_waiting:
                 self.get_logger().info("System locked for 3 seconds, waiting...")
                 self.is_waiting = True
-            #return   #testlerden sonra return aktif edilmeli
+            return
         self.is_waiting = False
 
         if self.current_mode != self.MODE_LASER or not msg.balloons or self.fx is None:
@@ -155,8 +156,15 @@ class OperationManagerNode(Node):
         
         target = min(msg.balloons, key=lambda b: ((b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2))
 
-        pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target.v_norm)
+        absolute_pan, absolute_tilt = self.norm_to_angle(target.u_norm, target.v_norm)
         
+        pan_delta = absolute_pan - self.last_commanded_pan
+        tilt_delta = absolute_tilt - self.last_commanded_tilt
+        
+        # Update last commanded angles
+        self.last_commanded_pan = absolute_pan
+        self.last_commanded_tilt = absolute_tilt
+
         is_centered = abs(target.u_norm - 0.5) < self.threshold and abs(target.v_norm - 0.5) < self.threshold
 
         fire_signal = False
@@ -352,20 +360,6 @@ def send_to_mcu(self, pan_delta, tilt_delta, laser_enable, laser_fire):
                 crc &= 0xFFFF  # Keep 16-bit
         return crc
     
-    def command_timer_callback(self):
-        """Send periodic commands to MCU"""
-        current_time = time.time()
-        
-        # If no target for timeout period, send home position command
-        if current_time - self.last_target_time > self.target_timeout:
-            # Send home position (0, 0) = parallel to ground
-            self.send_to_mcu(
-                pan_delta=0.0,
-                tilt_delta=0.0,
-                laser_enable=True,
-                laser_fire=False
-            )
-
     def parameter_callback(self, params):    
         for param in params:
             if param.name == 'centering_threshold':
