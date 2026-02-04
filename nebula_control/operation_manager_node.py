@@ -197,50 +197,50 @@ class OperationManagerNode(Node):
 
         return pan, tilt
     
-def send_to_mcu(self, pan_delta, tilt_delta, laser_enable, laser_fire):
-    """
-    Binary packet structure (22 bytes total):
-    - [0-1]   Header: 0xAA 0xFF
-    - [2-5]   pan_delta (float32)
-    - [6-9]   tilt_delta (float32)
-    - [10-13] feedforward_vel_pan (float32) - set to 0 for now
-    - [14-17] feedforward_vel_tilt (float32) - set to 0 for now
-    - [18]    laser_enable (uint8)
-    - [19]    laser_fire (uint8)
-    - [20-21] CRC16
-    """
-    if not self.serial_port or not self.serial_port.is_open:
-        self.get_logger().warn('Serial port not open, cannot send command')
-        return
-
-    try:
-        # Build packet (without CRC first)
-        packet_data = struct.pack(
-            '<BBffffBB',
-            0xAA,                    # Header 1
-            0xFF,                    # Header 2
-            float(pan_delta),        # Pan delta (degrees)
-            float(tilt_delta),       # Tilt delta (degrees)
-            0.0,                     # Feedforward vel pan (not used yet)
-            0.0,                     # Feedforward vel tilt (not used yet)
-            int(laser_enable),       # Laser enable flag
-            int(laser_fire)          # Laser fire flag
-        )
-        
-        # Calculate CRC16
-        crc = self.calculate_crc16(packet_data)
-        
-        # Append CRC (little-endian uint16)
-        packet = packet_data + struct.pack('<H', crc)
-        
-        # Send packet
-        self.serial_port.write(packet)
-        
-        # Optional: Log for debugging
-        # self.get_logger().debug(f'Sent: pan={pan_delta:.2f}, tilt={tilt_delta:.2f}, fire={laser_fire}')
-        
-    except Exception as e:
-        self.get_logger().error(f'Serial write failed: {e}')
+    def send_to_mcu(self, pan_delta, tilt_delta, laser_enable, laser_fire):
+        """
+        Binary packet structure (22 bytes total):
+        - [0-1]   Header: 0xAA 0xFF
+        - [2-5]   pan_delta (float32)
+        - [6-9]   tilt_delta (float32)
+        - [10-13] feedforward_vel_pan (float32) - set to 0 for now
+        - [14-17] feedforward_vel_tilt (float32) - set to 0 for now
+        - [18]    laser_enable (uint8)
+        - [19]    laser_fire (uint8)
+        - [20-21] CRC16
+        """
+        if not self.serial_port or not self.serial_port.is_open:
+            self.get_logger().warn('Serial port not open, cannot send command')
+            return
+    
+        try:
+            # Build packet (without CRC first)
+            packet_data = struct.pack(
+                '<BBffffBB',
+                0xAA,                    # Header 1
+                0xFF,                    # Header 2
+                float(pan_delta),        # Pan delta (degrees)
+                float(tilt_delta),       # Tilt delta (degrees)
+                0.0,                     # Feedforward vel pan (not used yet)
+                0.0,                     # Feedforward vel tilt (not used yet)
+                int(laser_enable),       # Laser enable flag
+                int(laser_fire)          # Laser fire flag
+            )
+            
+            # Calculate CRC16
+            crc = self.calculate_crc16(packet_data)
+            
+            # Append CRC (little-endian uint16)
+            packet = packet_data + struct.pack('<H', crc)
+            
+            # Send packet
+            self.serial_port.write(packet)
+            
+            # Optional: Log for debugging
+            # self.get_logger().debug(f'Sent: pan={pan_delta:.2f}, tilt={tilt_delta:.2f}, fire={laser_fire}')
+            
+        except Exception as e:
+            self.get_logger().error(f'Serial write failed: {e}')
 
 
     
@@ -275,7 +275,21 @@ def send_to_mcu(self, pan_delta, tilt_delta, laser_enable, laser_fire):
             except Exception as e:
                 self.get_logger().error(f'Telemetry read error: {e}')
                 time.sleep(0.1)
-    
+
+    def command_timer_callback(self):
+        """Send periodic commands to MCU"""
+        current_time = time.time()
+        
+        # If no target for timeout period, send home position command
+        if current_time - self.last_target_time > self.target_timeout:
+            # Send home position (0, 0) = parallel to ground
+            self.send_to_mcu(
+                pan_delta=0.0,
+                tilt_delta=0.0,
+                laser_enable=True,
+                laser_fire=False
+            )
+
     def parse_telemetry(self, packet):
         """
         Parse telemetry packet from MCU
