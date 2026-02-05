@@ -63,23 +63,6 @@ class OperationManagerNode(Node):
             self.serial_port = None
             self.get_logger().error(f'Serial error: {e}')
 
-        if self.serial_port:
-            self.telemetry_thread = threading.Thread(
-                target=self.telemetry_reader_loop,
-                daemon=True
-            )
-            self.telemetry_thread.start()
-            self.get_logger().info('Telemetry reader thread started')
-
-        self.command_timer = self.create_timer(
-            0.1,  # 10 Hz
-            self.command_timer_callback
-        )
-        
-        self.last_target_time = time.time()
-        self.target_timeout = 0.5  # 0.5 seconds without target → send home command
-        self.last_commanded_pan = 0.0
-        self.last_commanded_tilt = 0.0
         # Subscriptions
         self.balloons_sub = self.create_subscription(BalloonArray, '/vision/balloons', self.balloons_callback, target_qos)
         self.rectangles_sub = self.create_subscription(RectangleArray, '/vision/rectangles', self.rectangles_callback, target_qos)
@@ -151,19 +134,12 @@ class OperationManagerNode(Node):
 
         if self.current_mode != self.MODE_LASER or not msg.balloons or self.fx is None:
             return
-        
+
         self.last_target_time = time.time()
-        
+
         target = min(msg.balloons, key=lambda b: ((b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2))
 
-        absolute_pan, absolute_tilt = self.norm_to_angle(target.u_norm, target.v_norm)
-        
-        pan_delta = absolute_pan - self.last_commanded_pan
-        tilt_delta = absolute_tilt - self.last_commanded_tilt
-        
-        # Update last commanded angles
-        self.last_commanded_pan = absolute_pan
-        self.last_commanded_tilt = absolute_tilt
+        pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target.v_norm)
 
         is_centered = abs(target.u_norm - 0.5) < self.threshold and abs(target.v_norm - 0.5) < self.threshold
 
@@ -174,7 +150,6 @@ class OperationManagerNode(Node):
             self.get_logger().info(f"Laser Armed! Target Centered. Locking for {self.lock_duration}s...")
 
         self.send_to_mcu(pan_delta, tilt_delta, True, fire_signal)
-
 
         fb = GimbalFeedback()
         fb.pan_deg, fb.tilt_deg = pan_delta, tilt_delta
@@ -276,19 +251,6 @@ class OperationManagerNode(Node):
                 self.get_logger().error(f'Telemetry read error: {e}')
                 time.sleep(0.1)
 
-    def command_timer_callback(self):
-        """Send periodic commands to MCU"""
-        current_time = time.time()
-        
-        # If no target for timeout period, send home position command
-        if current_time - self.last_target_time > self.target_timeout:
-            # Send home position (0, 0) = parallel to ground
-            self.send_to_mcu(
-                pan_delta=0.0,
-                tilt_delta=0.0,
-                laser_enable=True,
-                laser_fire=False
-            )
 
     def parse_telemetry(self, packet):
         """
