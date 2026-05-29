@@ -111,6 +111,11 @@ class OperationManagerNode(Node):
         self.fire_start_time     = 0.0
         self.cooldown_start_time = 0.0
 
+        # Hedef kilitleme — rastgele balon atlamasını önler
+        self._locked_target_pos    = None   # (u_norm, v_norm) son kilitlenen balon
+        self._no_balloon_ticks     = 0      # ardışık balonsuz tick sayısı
+        self._no_balloon_threshold = 5      # kaç tick sonra gerçekten kayboldu sayılır (0.5s @10Hz)
+
         self._last_reconnect_attempt = 0.0
 
         # Control loop at 10 Hz — drives state machine and sends heartbeats
@@ -189,18 +194,25 @@ class OperationManagerNode(Node):
 
         elif self.state == self.STATE_TRACKING:
             if not has_balloons:
-                self.state = self.STATE_IDLE
-                self.get_logger().info('TRACKING -> IDLE: no balloons')
+                self._no_balloon_ticks += 1
+                if self._no_balloon_ticks >= self._no_balloon_threshold:
+                    # Gerçekten kayboldu — IDLE'a dön, kilidi sıfırla
+                    self.state = self.STATE_IDLE
+                    self._locked_target_pos = None
+                    self._no_balloon_ticks  = 0
+                    self.get_logger().info('TRACKING -> IDLE: balon kayboldu')
+                else:
+                    # Geçici kayıp — son pozisyonda bekle (delta=0 → mevcut konumu koru)
+                    self.send_to_mcu(0.0, 0.0, True, False, mode=self.MCU_MODE_TRACKING)
                 return
 
-            target = min(self.last_balloons,
-                         key=lambda b: (b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2)
+            self._no_balloon_ticks = 0
+
+            target = self._select_target(self.last_balloons)
             pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target.v_norm)
             is_centered = (abs(target.u_norm - 0.5) < self.threshold and
                            abs(target.v_norm - 0.5) < self.threshold)
 
-            # Görüntü gecikmesi nedeniyle tam delta gönderilirse aşırı dönme olur.
-            # tracking_gain ile ölçeklenerek kararlı yakınsama sağlanır.
             self.send_to_mcu(pan_delta * self.tracking_gain, tilt_delta * self.tracking_gain,
                              True, False, mode=self.MCU_MODE_TRACKING)
 
@@ -216,8 +228,7 @@ class OperationManagerNode(Node):
             if fire_elapsed < self.fire_duration:
                 # Keep tracking the balloon while firing; hold position if it already popped
                 if has_balloons:
-                    target = min(self.last_balloons,
-                                 key=lambda b: (b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2)
+                    target = self._select_target(self.last_balloons)
                     pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target.v_norm)
                 else:
                     pan_delta, tilt_delta = 0.0, 0.0
@@ -236,19 +247,65 @@ class OperationManagerNode(Node):
 
             if (now - self.cooldown_start_time) >= self.cooldown_duration:
                 if has_balloons:
+                    # Bir sonraki balona geç — önceki kilidi sıfırla
+                    self._locked_target_pos = None
+                    self._no_balloon_ticks  = 0
                     self.state = self.STATE_TRACKING
-                    self.get_logger().info('COOLDOWN -> TRACKING: more balloons remain')
+                    self.get_logger().info('COOLDOWN -> TRACKING: sonraki hedefe geçiliyor')
                 else:
+                    self._locked_target_pos = None
                     self.state = self.STATE_IDLE
-                    self.get_logger().info('COOLDOWN -> IDLE: all balloons gone')
+                    self.get_logger().info('COOLDOWN -> IDLE: tüm balonlar imha edildi')
 
     # ─── Helpers ────────────────────────────────────────────────────────────
 
+    def _select_target(self, balloons):
+        """
+        Hedef balonunu seç.
+        İlk kez veya kilit yoksa merkeze en yakını seç.
+        Kilit varsa son bilinen pozisyona en yakını seç — tek frame kayıplarında
+        farklı balona atlamayı engeller.
+        """
+        if not balloons:
+            return None
+
+        if self._locked_target_pos is None:
+            # İlk seçim: görüntü merkezine en yakın
+            target = min(balloons, key=lambda b: (b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2)
+        else:
+            lx, ly = self._locked_target_pos
+            # Son bilinen pozisyona en yakın balonu bul
+            target = min(balloons, key=lambda b: (b.u_norm - lx)**2 + (b.v_norm - ly)**2)
+            dist = math.sqrt((target.u_norm - lx)**2 + (target.v_norm - ly)**2)
+            # Çok uzaksa (büyük sıçrama) merkeze en yakına geri dön
+            if dist > 0.25:
+                target = min(balloons, key=lambda b: (b.u_norm - 0.5)**2 + (b.v_norm - 0.5)**2)
+
+        self._locked_target_pos = (target.u_norm, target.v_norm)
+        return target
+
     def norm_to_angle(self, u_norm, v_norm):
+        # Gerçek kalibrasyon değerleri gelince camera_info_callback'ten otomatik dolar:
+        #   fx = K[0], fy = K[4], cx = K[2], cy = K[5]
+        # Kalibrasyon yapılana kadar fallback:
+        #   cx = img_w / 2  (görüntü yatay merkezi)
+        #   cy = img_h / 2  (görüntü dikey merkezi)
+        #   fx = img_w      (~53° HFoV varsayımı: focal_length ≈ width / (2*tan(HFoV/2)))
+        #   fy = img_w      (kare piksel varsayımı, fy = fx)
+        cx = self.cx if self.cx is not None else self.img_w * 0.5
+        cy = self.cy if self.cy is not None else self.img_h * 0.5
+        fx = self.fx if self.fx is not None else self.img_w
+        fy = self.fy if self.fy is not None else self.img_w
+
+        # Piksel → normalize kamera koordinatı → açı (derece)
+        #   x = (u_px - cx) / fx
+        #   y = (v_px - cy) / fy
+        #   pan  =  atan(x)  (sağ pozitif)
+        #   tilt = -atan(y)  (yukarı pozitif, görüntü y ekseni aşağı yönlü olduğu için eksi)
         u = u_norm * self.img_w
         v = v_norm * self.img_h
-        x = (u - self.cx) / self.fx
-        y = (v - self.cy) / self.fy
+        x = (u - cx) / fx
+        y = (v - cy) / fy
         pan  =  math.degrees(math.atan(x))
         tilt = -math.degrees(math.atan(y))
         return pan, tilt
