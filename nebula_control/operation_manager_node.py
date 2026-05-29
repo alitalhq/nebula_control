@@ -41,6 +41,7 @@ class OperationManagerNode(Node):
         self.declare_parameter('fire_duration', 1.0)      # seconds laser fires
         self.declare_parameter('cooldown_duration', 1.5)  # seconds to hold after fire
         self.declare_parameter('balloon_timeout', 0.3)    # seconds without data = no balloons
+        self.declare_parameter('tracking_gain', 0.3)      # 0-1: görüntü gecikmesi nedeniyle tam delta gönderilmez
 
         self.serial_port_name  = self.get_parameter('serial_port').value
         self.baud_rate_val     = self.get_parameter('baudrate').value
@@ -48,6 +49,7 @@ class OperationManagerNode(Node):
         self.fire_duration     = self.get_parameter('fire_duration').value
         self.cooldown_duration = self.get_parameter('cooldown_duration').value
         self.balloon_timeout   = self.get_parameter('balloon_timeout').value
+        self.tracking_gain     = self.get_parameter('tracking_gain').value
 
         self.add_on_set_parameters_callback(self.parameter_callback)
 
@@ -197,7 +199,10 @@ class OperationManagerNode(Node):
             is_centered = (abs(target.u_norm - 0.5) < self.threshold and
                            abs(target.v_norm - 0.5) < self.threshold)
 
-            self.send_to_mcu(pan_delta, tilt_delta, True, False, mode=self.MCU_MODE_TRACKING)
+            # Görüntü gecikmesi nedeniyle tam delta gönderilirse aşırı dönme olur.
+            # tracking_gain ile ölçeklenerek kararlı yakınsama sağlanır.
+            self.send_to_mcu(pan_delta * self.tracking_gain, tilt_delta * self.tracking_gain,
+                             True, False, mode=self.MCU_MODE_TRACKING)
 
             if is_centered:
                 self.state           = self.STATE_FIRING
@@ -216,7 +221,8 @@ class OperationManagerNode(Node):
                     pan_delta, tilt_delta = self.norm_to_angle(target.u_norm, target.v_norm)
                 else:
                     pan_delta, tilt_delta = 0.0, 0.0
-                self.send_to_mcu(pan_delta, tilt_delta, True, True, mode=self.MCU_MODE_TRACKING)
+                self.send_to_mcu(pan_delta * self.tracking_gain, tilt_delta * self.tracking_gain,
+                                 True, True, mode=self.MCU_MODE_TRACKING)
             else:
                 # Fire complete — enter cooldown, laser off
                 self.state               = self.STATE_COOLDOWN
@@ -355,6 +361,8 @@ class OperationManagerNode(Node):
                 self.cooldown_duration = param.value
             elif param.name == 'balloon_timeout':
                 self.balloon_timeout = param.value
+            elif param.name == 'tracking_gain':
+                self.tracking_gain = param.value
             elif param.name in ['serial_port', 'baudrate']:
                 if param.name == 'serial_port':
                     self.serial_port_name = param.value
