@@ -175,7 +175,7 @@ class OperationManagerNode(Node):
 
         if self.state == self.STATE_IDLE:
             self.send_to_mcu(0.0, 0.0, False, False, mode=self.MCU_MODE_GROUND_LOCK)
-            if blue_rect and has_balloons:
+            if has_balloons:
                 self._locked_target_pos = None
                 self._no_balloon_ticks  = 0
                 self._transition(self.STATE_ENGAGING)  # CENTERING PX4 hazır olunca araya girer
@@ -220,7 +220,7 @@ class OperationManagerNode(Node):
 
         elif self.state == self.STATE_VERIFYING:
             self.send_to_mcu(0.0, 0.0, False, False, mode=self.MCU_MODE_GROUND_LOCK)
-            if blue_rect and has_balloons:
+            if has_balloons:
                 self._locked_target_pos = None
                 self._no_balloon_ticks  = 0
                 self._transition(self.STATE_ENGAGING)
