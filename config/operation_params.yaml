@@ -2,5 +2,10 @@ operation_manager:
   ros__parameters:
     serial_port: "/dev/ttyACM0"
     baudrate: 921600
-    centering_threshold: 0.01
-    lock_duration: 3.0
+    centering_threshold: 0.05    # mavi dikdörtgen merkezi için tolerans (frame fraksiyonu)
+    lock_angle_threshold: 1.0    # kilit için max hata (derece)
+    lock_duration: 0.3           # kilidi onaylamak için bekleme süresi (saniye)
+    fire_duration: 1.5           # lazer açık kalma süresi (saniye)
+    verify_timeout: 3.0          # VERIFYING'de balon bekleme süresi (saniye)
+    balloon_timeout: 0.3         # veri kesilince balon yok sayılır (saniye)
+    tracking_gain: 0.3
