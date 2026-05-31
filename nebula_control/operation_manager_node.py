@@ -165,6 +165,7 @@ class OperationManagerNode(Node):
             return
 
         if self.current_mode != self.MODE_LASER or self.img_w is None:
+            self.get_logger().warn(f'control_loop early return: mode={self.current_mode} img_w={self.img_w}', throttle_duration_sec=5.0)
             return
 
         now = time.time()
@@ -172,6 +173,11 @@ class OperationManagerNode(Node):
         rectangle_fresh = (now - self.last_rectangle_time) < self.balloon_timeout
         has_balloons    = balloon_fresh and bool(self.last_balloons)
         blue_rect       = self._find_blue_rectangle() if rectangle_fresh else None
+
+        self.get_logger().info(
+            f'[DBG] state={self.state} has_balloons={has_balloons} '
+            f'n_balloons={len(self.last_balloons)} balloon_age={now - self.last_balloon_time:.2f}s',
+            throttle_duration_sec=2.0)
 
         if self.state == self.STATE_IDLE:
             self.send_to_mcu(0.0, 0.0, False, False, mode=self.MCU_MODE_GROUND_LOCK)
