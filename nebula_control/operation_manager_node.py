@@ -39,11 +39,13 @@ class OperationManagerNode(Node):
         self.declare_parameter('baudrate',             921600)
         self.declare_parameter('centering_threshold',  0.05)   # frame fraksiyonu, dikdörtgen merkez toleransı
         self.declare_parameter('lock_angle_threshold', 1.0)    # derece, kilit için max hata
-        self.declare_parameter('lock_duration',        0.3)    # saniye, kilidi onaylamak için bekleme süresi
-        self.declare_parameter('fire_duration',        1.5)    # saniye, lazer açık kalma süresi
+        self.declare_parameter('lock_duration',        5)    # saniye, kilidi onaylamak için bekleme süresi
+        self.declare_parameter('fire_duration',        3)    # saniye, lazer açık kalma süresi
         self.declare_parameter('verify_timeout',       3.0)    # saniye, VERIFYING'de balon bekleme süresi
         self.declare_parameter('balloon_timeout',      0.3)    # saniye, veri kesilince balon yok sayılır
         self.declare_parameter('tracking_gain',        0.3)
+        self.declare_parameter('aim_offset_px_x',      0.0)    # piksel, lazer boresight'ının görüntü merkezinden X sapması (+sağ)
+        self.declare_parameter('aim_offset_px_y',      0.0)    # piksel, lazer boresight'ının görüntü merkezinden Y sapması (+aşağı)
 
         self.serial_port_name     = self.get_parameter('serial_port').value
         self.baud_rate_val        = self.get_parameter('baudrate').value
@@ -54,6 +56,8 @@ class OperationManagerNode(Node):
         self.verify_timeout       = self.get_parameter('verify_timeout').value
         self.balloon_timeout      = self.get_parameter('balloon_timeout').value
         self.tracking_gain        = self.get_parameter('tracking_gain').value
+        self.aim_offset_px_x      = self.get_parameter('aim_offset_px_x').value
+        self.aim_offset_px_y      = self.get_parameter('aim_offset_px_y').value
 
         self.add_on_set_parameters_callback(self.parameter_callback)
 
@@ -71,7 +75,7 @@ class OperationManagerNode(Node):
                 port=self.serial_port_name,
                 baudrate=self.baud_rate_val,
                 timeout=0.01)
-            self.get_logger().info('Serial connected')
+            self.get_logger().info('Serial connected update')
         except Exception as e:
             self.serial_port = None
             self.get_logger().error(f'Serial error: {e}')
@@ -104,6 +108,11 @@ class OperationManagerNode(Node):
         self._locked_target_pos    = None
         self._no_balloon_ticks     = 0
         self._no_balloon_threshold = 5
+
+        # son geçerli takip komutu — ateş sırasında balon anlık kaybolursa
+        # (lazer parlaması/duman) 0'a düşmek yerine bu komutu koru
+        self._last_track_pan  = 0.0
+        self._last_track_tilt = 0.0
 
         self._last_reconnect_attempt = 0.0
 
@@ -175,7 +184,7 @@ class OperationManagerNode(Node):
         blue_rect       = self._find_blue_rectangle() if rectangle_fresh else None
 
         self.get_logger().info(
-            f'[DBG] state={self.state} has_balloons={has_balloons} '
+            f'[DB????G] state={self.state} has_balloons={has_balloons} '
             f'n_balloons={len(self.last_balloons)} balloon_age={now - self.last_balloon_time:.2f}s',
             throttle_duration_sec=2.0)
 
@@ -198,6 +207,7 @@ class OperationManagerNode(Node):
             self._no_balloon_ticks = 0
             target = self._select_target(self.last_balloons)
             pan_deg, tilt_deg = self.norm_to_angle(target.u_norm, target.v_norm)
+            self._last_track_pan, self._last_track_tilt = pan_deg, tilt_deg
             self.send_to_mcu(pan_deg * self.tracking_gain, tilt_deg * self.tracking_gain,
                              True, False, mode=self.MCU_MODE_TRACKING)
 
@@ -214,13 +224,10 @@ class OperationManagerNode(Node):
             self._transition(self.STATE_FIRING)
 
         elif self.state == self.STATE_FIRING:
-            if has_balloons:
-                target = self._select_target(self.last_balloons)
-                pan_deg, tilt_deg = self.norm_to_angle(target.u_norm, target.v_norm)
-            else:
-                pan_deg, tilt_deg = 0.0, 0.0
-            self.send_to_mcu(pan_deg * self.tracking_gain, tilt_deg * self.tracking_gain,
-                             True, True, mode=self.MCU_MODE_TRACKING)
+            # TEST: ateş sırasında 0 delta gönder (pozisyonu tut). MCU delta'yı
+            # göreli/hız komutu olarak yorumluyorsa donmuş artık komut sürekli
+            # kaymaya sebep oluyordu; 0 gönderince kayma durursa teşhis doğrulanır.
+            self.send_to_mcu(0.0, 0.0, True, True, mode=self.MCU_MODE_TRACKING)
             if now - self.fire_start_time >= self.fire_duration:
                 self._transition(self.STATE_VERIFYING)
 
@@ -280,14 +287,20 @@ class OperationManagerNode(Node):
         return target
 
     def norm_to_angle(self, u_norm, v_norm):
-        cx = self.cx if self.cx is not None else self.img_w * 0.5
-        cy = self.cy if self.cy is not None else self.img_h * 0.5
+        # Nişan hatasını LAZER BORESIGHT'ına göre hesapla, kameranın principal
+        # point'ine (cx,cy) göre DEĞİL. balloon_detector crosshair'i görüntü
+        # merkezine (W/2, H/2) çiziyor ve lazer oraya hizalı; oysa bu kameranın
+        # principal point'i (686, 294) merkezden ~46px sağda / 66px yukarıda.
+        # cx,cy kullanınca balon principal point'e oturuyor, lazer görüntü
+        # merkezinden ateş edince sürekli sol-alta kayıyordu.
+        bx = self.img_w * 0.5 + self.aim_offset_px_x
+        by = self.img_h * 0.5 + self.aim_offset_px_y
         fx = self.fx if self.fx is not None else self.img_w
         fy = self.fy if self.fy is not None else self.img_w
         u = u_norm * self.img_w
         v = v_norm * self.img_h
-        pan  =  math.degrees(math.atan((u - cx) / fx))
-        tilt = -math.degrees(math.atan((v - cy) / fy))
+        pan  =  math.degrees(math.atan((u - bx) / fx))
+        tilt = -math.degrees(math.atan((v - by) / fy))
         return pan, tilt
 
     def send_to_mcu(self, pan_delta, tilt_delta, laser_enable, laser_fire,
@@ -371,6 +384,10 @@ class OperationManagerNode(Node):
                 self.balloon_timeout = param.value
             elif param.name == 'tracking_gain':
                 self.tracking_gain = param.value
+            elif param.name == 'aim_offset_px_x':
+                self.aim_offset_px_x = param.value
+            elif param.name == 'aim_offset_px_y':
+                self.aim_offset_px_y = param.value
             elif param.name in ['serial_port', 'baudrate']:
                 if param.name == 'serial_port':
                     self.serial_port_name = param.value
